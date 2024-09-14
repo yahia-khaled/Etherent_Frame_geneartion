@@ -9,6 +9,10 @@
 #include <sstream>
 #include <unordered_map>
 
+// CRC polynomial and table
+const int CRC32_POLY = 0x04C11DB7;
+const int CRC32_INIT = 0xFFFFFFFF;
+const int CRC32_XOR_OUT = 0xFFFFFFFF;
 
 #define IFG 0x07
 
@@ -34,16 +38,14 @@ private:
     int PacketSize;
     void createBurst(int BurstNumber);
     void cratePacket(int BurstNumber, int PackeNumber);
-    int *CRC();
+    int *CalculateCRC(int start_index, int end_index);
     int CalculatePacketSize();
-    short int mergeTwoByte(int First, int second);
 
 public : 
 
     Ethernet();
     void ReadConfig(string filename);
     void createoutput();
-    
     ~Ethernet();
 };
 
@@ -91,7 +93,6 @@ void Ethernet::ReadConfig(string filename){
         }
     }
 
-    cout << configMap["Eth.SourceAddress"]<<endl;
     // set valuse in member of class
     LineRate = stoi(configMap["Eth.LineRate"]);
     CaptureSizeMs = stoi(configMap["Eth.CaptureSizeMs"]);
@@ -103,20 +104,6 @@ void Ethernet::ReadConfig(string filename){
     BurstPeriodicity_us = stoi(configMap["Eth.BurstPeriodicity_us"]);
     Preamble_SFD_header = 0xFB555555555555D5;
 
-    cout<<DestAddress<<endl;
-
-    //initialize payload
-
-    number_of_burst = (CaptureSizeMs * 1000) / BurstPeriodicity_us;
-    PacketSize = 1470;
-    int payload_size = PacketSize * number_of_burst * BurstSize;
-    cout << "Payload size" << payload_size << endl;
-    payload = new int[payload_size];
-
-    for (int i = 0; i < payload_size; i++)
-    {
-        payload[i] = 0;
-    }
 }
 
 int Ethernet ::CalculatePacketSize() {
@@ -127,7 +114,22 @@ int Ethernet ::CalculatePacketSize() {
 
 void Ethernet ::createoutput(void){
 
-    outFile.open("output.txt", std::ios::app);
+    // assumptions for payload
+    // initialize payload
+    number_of_burst = (CaptureSizeMs * 1000) / BurstPeriodicity_us;
+    PacketSize = 1005;
+    int payload_size = PacketSize * number_of_burst * BurstSize;
+    cout << "Payload size" << payload_size << endl;
+    payload = new int[payload_size];
+
+    for (int i = 0; i < payload_size; i++)
+    {
+        payload[i] = 0;
+    }
+
+    ///////////////////////////////////////////////////
+
+    outFile.open("output.txt", std::ios::trunc);
 
     // Capture the current time
     auto start_time = std::chrono::system_clock::now();
@@ -144,7 +146,7 @@ void Ethernet ::createoutput(void){
         auto now = std::chrono::system_clock::now();
         
         auto delay = std::chrono::microseconds(BurstPeriodicity_us);
-        auto target_time = start_time + delay;
+        auto target_time = now + delay;
     }
     outFile.close();      
 }
@@ -197,11 +199,15 @@ void Ethernet ::cratePacket(int BurstNumber, int PackeNumber){
         outFile << setw(8) << setfill(' '); 
         for (int k = 0; k < 4; k++)
         {
-            outFile << hex << setw(2) << setfill('0') << to_string(data[k]);
+            outFile << hex << setw(2) << setfill('0') << data[k];
         }
         outFile<<"\n";
         
     }
+
+    //calculation of CRC
+
+    int * CRC = CalculateCRC(start_index , end_index);
 
     // Calculate the padding needed for 4-byte alignment
     int packetSizeIncludingCRC = CalculatePacketSize();
@@ -211,6 +217,13 @@ void Ethernet ::cratePacket(int BurstNumber, int PackeNumber){
 
     if (alignmentOffset == 0)
     {
+        outFile << setw(8) << setfill(' ');
+        for (int k = 0; k < 4; k++)
+        {
+            outFile << hex << setw(2) << setfill('0') << CRC[k];
+        }
+        outFile << "\n";
+
         if((numIFG % 4) != 0)
         {
             numIFG = numIFG + 4 - (numIFG % 4);
@@ -232,19 +245,33 @@ void Ethernet ::cratePacket(int BurstNumber, int PackeNumber){
         int offset[3];
         for (int i = 0; i < alignmentOffset; i++)
         {
-            offset[i] = payload[end_index-alignmentOffset+i];
+            offset[i] = payload[end_index- alignmentOffset + i];
         }
 
         outFile << setw(8) << setfill(' ');
         for (int i = 0; i < alignmentOffset; i++)
         {
-            outFile << hex << setw(2) << setfill('0') << to_string(offset[i]);
+            outFile << hex << setw(2) << setfill('0') << offset[i];
         }
         for (int i = 0; i < (4 - alignmentOffset); i++)
         {
-            outFile << hex << setw(2) << setfill('0') << to_string(IFG);
+            outFile << hex << setw(2) << setfill('0') << CRC[i];
         }
         outFile << "\n";
+
+        outFile << setw(8) << setfill(' ');
+        for (int i = (4 - alignmentOffset); i <4 ; i++)
+        {
+            outFile << hex << setw(2) << setfill('0') << CRC[i];
+        }
+
+        for (int i = 0; i < (4 - alignmentOffset); i++)
+        {
+            outFile << hex << setw(2) << setfill('0') << IFG;
+        }
+
+        outFile << "\n";
+
         if ((MinNumOfIFGsPerPacket % 4) != 0)
         {
             numIFG = MinNumOfIFGsPerPacket + 4 - (MinNumOfIFGsPerPacket % 4);
@@ -261,6 +288,54 @@ void Ethernet ::cratePacket(int BurstNumber, int PackeNumber){
         }
     }    
     
+}
+
+int * Ethernet ::CalculateCRC(int start_index, int end_index)
+{
+    // CRC32 table
+    static int table[256];
+    static bool tableComputed = false;
+    
+
+    if (!tableComputed)
+    {
+        for (int i = 0; i < 256; ++i)
+        {
+            int crc = i;
+            for (int j = 8; j > 0; --j)
+            {
+                if (crc & 1)
+                {
+                    crc = (crc >> 1) ^ CRC32_POLY;
+                }
+                else
+                {
+                    crc = crc >> 1;
+                }
+            }
+            table[i] = crc;
+        }
+        tableComputed = true;
+    }
+
+    int crc = CRC32_INIT;
+    for (int i = start_index; i < end_index; ++i)
+    {
+        int byte = payload[i];
+        int tableIndex = (crc ^ byte) & 0xFF;
+        crc = (crc >> 8) ^ table[tableIndex];
+    }
+
+    int output = crc ^ CRC32_XOR_OUT;
+
+    int *CRCResult = new int[4];
+
+    for (int i = 0; i < 4; i++)
+    {
+        int shift = i * 8;
+        CRCResult[i] = (output >> shift) & 0xFF;
+    }
+    return CRCResult;
 }
 
 Ethernet::~Ethernet()

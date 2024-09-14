@@ -14,7 +14,5 @@ int main(int argc, char)
 
     net.createoutput();
 
-    system("pause");
-
     return 0;
 }
